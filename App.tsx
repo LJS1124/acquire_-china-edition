@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   GamePhase, 
   TileState, 
@@ -318,12 +318,13 @@ const App: React.FC = () => {
   const [localPlayerName, setLocalPlayerName] = useState('玩家1');
   const [currentRoom, setCurrentRoom] = useState<Room | null>(null);
   const [isConnected, setIsConnected] = useState(false);
+  const lastHeartbeat = useRef<Record<string, number>>({});
 
   // --- Game State ---
   // Note: These are initialized empty/default and populated when Game Starts
   const [grid, setGrid] = useState<TileData[][]>(createGrid);
   const [deck, setDeck] = useState<Coordinates[]>([]);
-  const [companies, setCompanies] = useState(INITIAL_COMPANIES);
+  const [companies, setCompanies] = useState<Record<CompanyId, Company>>(INITIAL_COMPANIES as Record<CompanyId, Company>);
   const [players, setPlayers] = useState<Player[]>([]);
   const [currentPlayerIndex, setCurrentPlayerIndex] = useState(0);
   const [phase, setPhase] = useState<GamePhase>(GamePhase.PLACE_TILE);
@@ -342,6 +343,61 @@ const App: React.FC = () => {
     initNetwork((msg: NetworkMessage) => {
         // Handle Global Network Messages
         switch (msg.type) {
+            case 'PLAYER_DISCONNECTED':
+                 const pId = msg.payload.playerId;
+                 console.log(`[App] Player Disconnected: ${pId}`);
+                 
+                 if (currentRoom && currentRoom.id === msg.roomId) {
+                     // 1. If I am host, remove the player
+                     if (currentRoom.hostId === localPlayerId) {
+                         const updatedRoom = handleHostRoomLogic(currentRoom, {
+                             type: 'UPDATE_ROOM',
+                             roomId: msg.roomId,
+                             senderId: pId,
+                             payload: { left: true }
+                         }, localPlayerId);
+                         
+                         if (updatedRoom) {
+                             setCurrentRoom(updatedRoom);
+                             broadcastMessage({
+                                 type: 'SYNC_STATE',
+                                 roomId: currentRoom.id,
+                                 senderId: localPlayerId,
+                                 payload: { room: updatedRoom }
+                             });
+                         }
+                     }
+                     // 2. If Host Disconnected -> Host Migration
+                     else if (pId === currentRoom.hostId) {
+                         const remainingPlayers = currentRoom.players.filter(p => p.id !== pId);
+                         if (remainingPlayers.length > 0) {
+                             const newHost = remainingPlayers[0];
+                             if (newHost.id === localPlayerId) {
+                                 const myProfile = { ...newHost, isHost: true, isReady: true };
+                                 const updatedPlayers = remainingPlayers.map(p => 
+                                     p.id === localPlayerId ? myProfile : p
+                                 );
+                                 const newRoomState: Room = {
+                                     ...currentRoom,
+                                     hostId: localPlayerId,
+                                     players: updatedPlayers
+                                 };
+                                 setCurrentRoom(newRoomState);
+                                 broadcastMessage({
+                                     type: 'SYNC_STATE',
+                                     roomId: currentRoom.id,
+                                     senderId: localPlayerId,
+                                     payload: { room: newRoomState }
+                                 });
+                             }
+                         } else {
+                             setCurrentRoom(null);
+                             setAppMode('LOBBY');
+                         }
+                     }
+                 }
+                 break;
+
             case 'JOIN_ROOM':
             case 'UPDATE_ROOM':
                 // Debug log to verify state availability
@@ -406,11 +462,79 @@ const App: React.FC = () => {
                      }
                  }
                  break;
+
+            case 'HEARTBEAT':
+                 if (msg.roomId === currentRoom?.id) {
+                     lastHeartbeat.current[msg.senderId] = Date.now();
+                 }
+                 break;
         }
     }, (connected) => {
         setIsConnected(connected);
     });
   }, [currentRoom, localPlayerId, appMode]);
+
+  // Heartbeat Loop
+  useEffect(() => {
+      if (!currentRoom || !isConnected) return;
+
+      const timer = setInterval(() => {
+          broadcastMessage({
+              type: 'HEARTBEAT',
+              roomId: currentRoom.id,
+              senderId: localPlayerId,
+              payload: {}
+          });
+      }, 2000);
+
+      return () => clearInterval(timer);
+  }, [currentRoom, isConnected, localPlayerId]);
+
+  // Heartbeat Check Loop
+  useEffect(() => {
+      if (!currentRoom || !isConnected) return;
+
+      const checkTimer = setInterval(() => {
+          const now = Date.now();
+          
+          if (currentRoom.hostId !== localPlayerId) {
+              const hostLastSeen = lastHeartbeat.current[currentRoom.hostId];
+              
+              if (hostLastSeen && now - hostLastSeen > 10000) {
+                  console.warn("Host Heartbeat Timeout!");
+                  
+                  const remainingPlayers = currentRoom.players.filter(p => p.id !== currentRoom.hostId);
+                  if (remainingPlayers.length > 0) {
+                      const newHost = remainingPlayers[0];
+                      if (newHost.id === localPlayerId) {
+                           console.log("Host timed out. I am taking over.");
+                           const myProfile = { ...newHost, isHost: true, isReady: true };
+                           const updatedPlayers = remainingPlayers.map(p => 
+                               p.id === localPlayerId ? myProfile : p
+                           );
+                           const newRoomState: Room = {
+                               ...currentRoom,
+                               hostId: localPlayerId,
+                               players: updatedPlayers
+                           };
+                           setCurrentRoom(newRoomState);
+                           broadcastMessage({
+                               type: 'SYNC_STATE',
+                               roomId: currentRoom.id,
+                               senderId: localPlayerId,
+                               payload: { room: newRoomState }
+                           });
+                      }
+                  } else {
+                      setCurrentRoom(null);
+                      setAppMode('LOBBY');
+                  }
+              }
+          }
+      }, 1000);
+      
+      return () => clearInterval(checkTimer);
+  }, [currentRoom, isConnected, localPlayerId]);
 
   // Helper to sync game state to other players (Only current player or host should trigger this)
   const syncGameState = (overrideState?: Partial<GameState>) => {
@@ -448,7 +572,7 @@ const App: React.FC = () => {
       };
       const room = createNetworkRoom(me);
       // IMPORTANT: Explicitly join the websocket channel
-      joinGameRoom(room.id);
+      joinGameRoom(room.id, localPlayerId);
       
       setCurrentRoom(room);
       setAppMode('ROOM');
@@ -464,7 +588,7 @@ const App: React.FC = () => {
       };
       
       // Explicitly join websocket channel
-      joinGameRoom(roomId);
+      joinGameRoom(roomId, localPlayerId);
       
       // Optimistically wait for state sync
       broadcastMessage({
@@ -528,6 +652,31 @@ const App: React.FC = () => {
 
   const handleLeaveRoom = () => {
       if (currentRoom) {
+          // If I am host, assign new host before leaving
+          if (currentRoom.hostId === localPlayerId && currentRoom.players.length > 1) {
+              const remainingPlayers = currentRoom.players.filter(p => p.id !== localPlayerId);
+              const newHost = remainingPlayers[0]; // Earliest joined
+              const updatedPlayers = remainingPlayers.map(p => 
+                  p.id === newHost.id 
+                      ? { ...p, isHost: true, isReady: true } 
+                      : p
+              );
+              
+              const updatedRoom: Room = {
+                  ...currentRoom,
+                  hostId: newHost.id,
+                  players: updatedPlayers
+              };
+
+              // Broadcast the new state so everyone knows the new host
+              broadcastMessage({
+                  type: 'SYNC_STATE',
+                  roomId: currentRoom.id,
+                  senderId: localPlayerId,
+                  payload: { room: updatedRoom }
+              });
+          }
+
           broadcastMessage({
             type: 'UPDATE_ROOM',
             roomId: currentRoom.id,
@@ -578,7 +727,7 @@ const App: React.FC = () => {
       
       // 2. Check New Corp creation if max corps reached
       if (distinctCorps.length === 0 && occupied.length > 0) {
-          const availableCount = Object.values(companiesState).filter(c => c.size === 0).length;
+          const availableCount = (Object.values(companiesState) as Company[]).filter(c => c.size === 0).length;
           if (availableCount === 0) return true; // Dead: Cannot form new corp because all are taken
       }
       
@@ -623,7 +772,7 @@ const App: React.FC = () => {
     // 2. Form New Corp (Neighbors are unincorporated)
     if (uniqueCompanyIds.length === 0 && occupiedNeighbors.length > 0) {
       // Check if any corporations are available
-      const availableCorps = Object.values(companies).filter(c => c.size === 0);
+      const availableCorps = (Object.values(companies) as Company[]).filter(c => c.size === 0);
       if (availableCorps.length === 0) {
         // Logic handled by dead tile check mostly, but fallback:
         return; 
@@ -642,7 +791,7 @@ const App: React.FC = () => {
 
     // 4. Merge (2+ unique companies)
     if (uniqueCompanyIds.length > 1) {
-      const involvedCorps = uniqueCompanyIds.map(id => companies[id]);
+      const involvedCorps = uniqueCompanyIds.map(id => companies[id]) as Company[];
       
       const safeCorps = involvedCorps.filter(c => c.safe);
       if (safeCorps.length > 1) {
@@ -944,7 +1093,7 @@ const App: React.FC = () => {
       let finalPlayers = [...players];
       addLog("=== 正在结算游戏资产 ===");
 
-      Object.values(companies).forEach(company => {
+      (Object.values(companies) as Company[]).forEach(company => {
           if (company.size > 0) {
               finalPlayers = distributeBonuses(company, finalPlayers);
               const price = getStockPrice(company.tier, company.size);
@@ -984,7 +1133,7 @@ const App: React.FC = () => {
     if (!isMyTurn()) return;
 
     // 1. Check for Game End
-    const activeCompanies = Object.values(companies).filter(c => c.size > 0);
+    const activeCompanies = (Object.values(companies) as Company[]).filter(c => c.size > 0);
     const conditionSize = activeCompanies.some(c => c.size >= END_GAME_SIZE);
     const conditionAllSafe = activeCompanies.length > 0 && activeCompanies.every(c => c.safe);
     
@@ -1090,7 +1239,7 @@ const App: React.FC = () => {
         {/* Left Sidebar: Market Info */}
         <div className="hidden lg:block h-full z-10 shadow-xl shadow-black/50">
             <StockMarket gameState={{
-                grid, companies, players, currentPlayerIndex, phase, turnLog, lastPlacedTile, purchasedStockCount, winnerId, deck
+                grid, companies: companies as Record<CompanyId, Company>, players, currentPlayerIndex, phase, turnLog, lastPlacedTile, purchasedStockCount, winnerId, deck
             }} />
         </div>
 
@@ -1099,7 +1248,7 @@ const App: React.FC = () => {
           <div className="max-w-5xl w-full">
             <GameGrid 
                 gameState={{
-                    grid, companies, players, currentPlayerIndex, phase, turnLog, lastPlacedTile, purchasedStockCount, winnerId, deck
+                    grid, companies: companies as Record<CompanyId, Company>, players, currentPlayerIndex, phase, turnLog, lastPlacedTile, purchasedStockCount, winnerId, deck
                 }} 
                 selectedTile={selectedTile}
                 onSelectTile={handleSelectTile}
@@ -1146,7 +1295,7 @@ const App: React.FC = () => {
                     请在坐标 <span className="text-yellow-400 font-mono font-bold mx-1">{grid[pendingNewCorp.row][pendingNewCorp.col].label}</span> 处选择一家公司进行注册：
                 </p>
                 <div className="grid grid-cols-2 gap-4 relative z-10">
-                    {Object.values(companies).filter(c => c.size === 0).map(c => (
+                    {(Object.values(companies) as Company[]).filter(c => c.size === 0).map(c => (
                         <button
                             key={c.id}
                             onClick={() => createCorporation(c.id)}

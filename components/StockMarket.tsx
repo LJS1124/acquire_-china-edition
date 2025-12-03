@@ -28,7 +28,7 @@ const StockMarket: React.FC<StockMarketProps> = ({ gameState }) => {
             <BarChart3 size={14} /> 上市企业概况
         </h2>
         
-        {Object.values(companies).map((company) => {
+        {(Object.values(companies) as import('../types').Company[]).map((company) => {
           const price = getStockPrice(company.tier, company.size);
           const bonuses = getBonuses(price);
           const isSafe = company.safe;

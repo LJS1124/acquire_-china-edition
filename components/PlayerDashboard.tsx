@@ -191,7 +191,7 @@ const PlayerDashboard: React.FC<PlayerDashboardProps> = ({
                 </div>
                 
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2.5 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
-                    {Object.values(companies).map((company) => {
+                    {(Object.values(companies) as import('../types').Company[]).map((company) => {
                         const price = getStockPrice(company.tier, company.size);
                         const canAfford = myPlayer.cash >= price;
                         const hasStock = company.availableShares > 0;

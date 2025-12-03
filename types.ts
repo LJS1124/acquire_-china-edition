@@ -96,7 +96,9 @@ export type NetworkMessageType =
   | 'UPDATE_ROOM' 
   | 'START_GAME' 
   | 'GAME_ACTION' 
-  | 'SYNC_STATE';
+  | 'SYNC_STATE'
+  | 'PLAYER_DISCONNECTED'
+  | 'HEARTBEAT';
 
 export interface NetworkMessage {
   type: NetworkMessageType;

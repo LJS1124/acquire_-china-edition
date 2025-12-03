@@ -58,9 +58,9 @@ export const initNetwork = (onMessage: (msg: NetworkMessage) => void, onStatusCh
 };
 
 // Join a specific room channel on the server
-export const joinGameRoom = (roomId: string) => {
+export const joinGameRoom = (roomId: string, playerId: string) => {
   if (socket && socket.connected) {
-    socket.emit('join_room', roomId);
+    socket.emit('join_room', { roomId, playerId });
   } else {
     console.warn('Cannot join room: Socket not connected');
   }
